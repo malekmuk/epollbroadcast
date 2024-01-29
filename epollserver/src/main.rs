@@ -1,5 +1,5 @@
 use std::net::TcpListener;
-use std::io::Result;
+use std::io::{Error, ErrorKind, Result};
 use std::os::fd::{AsRawFd, RawFd};
 use structopt::StructOpt;
 
@@ -12,23 +12,11 @@ struct Opt {
     port: u16
 }
 
-fn epoll_init(sockfd: RawFd) -> Option<i32> {
-    unsafe {
-        let epfd = libc::epoll_create1(0);
-
-        if epfd >= 0 {
-            let mut e = libc::epoll_event {
-                events: libc::EPOLLIN as u32,
-                u64: sockfd as u64
-            };
-            
-            if libc::epoll_ctl(epfd, libc::EPOLL_CTL_ADD, sockfd, &mut e) == 0 {
-                return Some(epfd);
-            }
-        }
+fn handle_client(cfd: i32, epfd: i32) {
+    unsafe { 
+        libc::epoll_ctl(epfd, libc::EPOLL_CTL_DEL, cfd, std::ptr::null_mut()); 
+        libc::close(cfd);
     }
-
-    None
 }
 
 fn accept_client(sockfd: i32, epfd: i32) {
@@ -50,13 +38,6 @@ fn accept_client(sockfd: i32, epfd: i32) {
     unsafe { libc::epoll_ctl(epfd, libc::EPOLL_CTL_ADD, cfd, &mut e); }
 }
 
-fn handle_client(cfd: i32, epfd: i32) {
-    unsafe { 
-        libc::epoll_ctl(epfd, libc::EPOLL_CTL_DEL, cfd, std::ptr::null_mut()); 
-        libc::close(cfd);
-    }
-}
-
 fn await_clients(sockfd: i32, epfd: i32, events: *mut libc::epoll_event) {
     loop {
         println!("Waiting for events!");
@@ -65,19 +46,38 @@ fn await_clients(sockfd: i32, epfd: i32, events: *mut libc::epoll_event) {
         println!("Got {} events!", ready);
 
         for i in 0..ready as isize {
-            let event = unsafe { events.offset(i).as_mut() };
-            match event {
-                Some(e) => {
-                    if e.u64 == sockfd as u64 {
-                        accept_client(sockfd, epfd);
-                    } else {
-                        handle_client(e.u64 as i32, epfd);
-                    }
+            if let Some(event) = unsafe { events.offset(i).as_mut() } {
+                if event.u64 == sockfd as u64 {
+                    accept_client(sockfd, epfd);
+                } else {
+                    handle_client(event.u64 as i32, epfd);
                 }
-                None => {}
-            }                 
+            }
         }
-        
+    }
+}
+
+fn epoll_init(sockfd: RawFd) -> Result<i32> {
+    unsafe {
+        let epfd = libc::epoll_create1(0);
+
+        if epfd >= 0 {
+            let mut e = libc::epoll_event {
+                events: libc::EPOLLIN as u32,
+                u64: sockfd as u64
+            };
+            
+            if libc::epoll_ctl(epfd, libc::EPOLL_CTL_ADD, sockfd, &mut e) == 0 {
+                return Ok(epfd);
+            }
+            else {
+                let errmsg = format!("epoll ctl failed to add server fd {} -- OS Error: {}", sockfd, *libc::__errno_location());
+                return Err(Error::new(ErrorKind::Other, errmsg));
+            }
+        }
+
+        let errmsg = format!("epoll ctl failed to add server fd -- OS Error: {}", *libc::__errno_location());
+        Err(Error::new(ErrorKind::Other, errmsg))
     }
 }
 
@@ -89,11 +89,9 @@ fn main() -> Result<()> {
     let listener = TcpListener::bind(addr)?;
     let sockfd = listener.as_raw_fd();
 
-    if let Some(epfd) = epoll_init(sockfd) {
-        let events: *mut libc::epoll_event = Vec::with_capacity(MAX_EVENTS as usize).as_mut_ptr();
-
-        await_clients(sockfd, epfd, events);
-    }
+    let epfd = epoll_init(sockfd)?;
+    let events: *mut libc::epoll_event = Vec::with_capacity(MAX_EVENTS as usize).as_mut_ptr();
+    await_clients(sockfd, epfd, events);
 
     Ok(())
 }
