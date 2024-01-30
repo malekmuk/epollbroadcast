@@ -27,7 +27,7 @@ impl ClientState {
     }
 }
 
-fn broadcast_message(cfd: i32, clients: &mut Vec<ClientState>) {
+fn broadcast_message(cfd: i32, clients: &Vec<ClientState>) {
     let client = clients.get(cfd as usize).unwrap();
     let message = client.buf.as_ptr() as *const libc::c_void;
     let len = client.buf.len();
@@ -53,7 +53,7 @@ fn handle_client(epfd: i32, cfd: i32, clients: &mut Vec<ClientState>) {
                 match errno {
                     libc::EAGAIN => { return; },
                     _ => {
-                        eprintln!("Unexpected read error: {} -- client (fd = {}) being removed!", errno, cfd);
+                        eprintln!("unexpected read error: {} -- client (fd = {}) being removed!", errno, cfd);
                         remove_client(epfd, cfd, clients);
                     }
                 }
@@ -81,7 +81,7 @@ fn remove_client(epfd: i32, cfd: i32, clients: &mut Vec<ClientState>) {
 
     if let Some(client) = clients.get_mut(cfd as usize) {
         client.fd = -1;
-        println!("Removed client {}", cfd);
+        println!("removed client {}", cfd);
     }
 }
 
@@ -133,7 +133,7 @@ fn await_clients(sockfd: i32, epfd: i32, events: *mut libc::epoll_event) {
         }
 
         for i in 0..ready as isize {
-            if let Some(event) = unsafe { events.offset(i).as_mut() } {
+            if let Some(event) = unsafe { events.offset(i).as_ref() } {
                 if event.u64 == sockfd as u64 {
                     accept_client(epfd, sockfd, &mut clients);
                 } else {
