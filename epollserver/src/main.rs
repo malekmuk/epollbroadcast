@@ -1,6 +1,7 @@
-use std::collections::HashSet;
-use std::net::TcpListener;
-use std::io::{Error, Result};
+use std::borrow::{Borrow, BorrowMut};
+use std::collections::HashMap;
+use std::net::{TcpListener, TcpStream, Shutdown};
+use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::os::fd::AsRawFd;
 use structopt::StructOpt;
 
@@ -15,87 +16,78 @@ struct Opt {
 }
 
 struct ClientState {
-    fd: i32,
+    stream: TcpStream,
     buf: Vec<u8>
 }
 
 impl ClientState {
-    pub fn with_fd(fd: i32) -> ClientState {
+    pub fn with_stream(stream: TcpStream) -> ClientState {
         ClientState {
-            fd,
+            stream,
             buf: Vec::with_capacity(BUFFER_SIZE),
         }
     }
 }
 
-fn broadcast_message(orator: &ClientState, active: &HashSet<i32>) {
-    let message = orator.buf.as_ptr() as *const libc::c_void;
-    let len = orator.buf.len();
+fn broadcast_message(orator: &ClientState, clients: &mut HashMap<i32, ClientState>){
+    let stream = orator.stream.borrow();
+    let fd = stream.as_raw_fd();
+    let message = orator.buf.as_ref();
 
-    for client in active.iter() {
-        if *client != orator.fd {
-            unsafe { libc::write(*client, message, len) };
+    for (cfd, client) in clients.iter_mut() {
+        if *cfd != fd {
+            if let Err(e) = client.stream.write(message) {
+                eprintln!("write error (fd = {}): {e}", *cfd);
+            }
         }
     }
 }
 
-fn handle_client(epfd: i32, cfd: i32, clients: &mut Vec<ClientState>, active: &mut HashSet<i32>) {
-    let client = clients.get_mut(cfd as usize).unwrap();
-    let bufptr = unsafe { client.buf.as_mut_ptr().offset(client.buf.len() as isize) as *mut libc::c_void };
-    let count = client.buf.capacity() - client.buf.len();
-    let ret = unsafe { libc::read(cfd, bufptr, count) };
+fn handle_client(epfd: i32, cfd: i32, clients: &mut HashMap<i32, ClientState>) {
+    let client = clients.get_mut(&cfd).unwrap();
+    let stream = client.stream.borrow_mut();
+    let cfd = stream.as_raw_fd();
 
-    match ret {
-        -1 => {
-            unsafe {
-                let errno = *(libc::__errno_location());
-                match errno {
-                    libc::EAGAIN => { return; },
-                    _ => {
-                        eprintln!("read error (removing fd = {}): {}", cfd, Error::last_os_error());
-                        remove_client(epfd, cfd, active);
-                    }
+    match stream.read(&mut client.buf) {
+        Ok(bytes) => {
+            if bytes == 0 {
+                remove_client(epfd, cfd, clients);
+                return;
+            }
+
+            if client.buf.ends_with(b"\n") || client.buf.len() == BUFFER_SIZE {
+                broadcast_message(client, clients);
+                client.buf.clear();
+            } 
+        },
+        Err(e) => {
+            match e.kind() {
+                ErrorKind::WouldBlock => return,
+                _ =>  { 
+                    eprintln!("read error (removing fd = {}): {}", cfd, Error::last_os_error());
+                    remove_client(epfd, cfd, clients);
                 }
             }
         }
-        0 => {
-            remove_client(epfd, cfd, active);
-        }
-        _ => {
-            unsafe { client.buf.set_len(client.buf.len() + ret as usize) };
-
-            if client.buf.ends_with(b"\n") || client.buf.len() == BUFFER_SIZE {
-                broadcast_message(client, active);
-                client.buf.clear();
-            } 
-        }
     }
 }
 
-fn remove_client(epfd: i32, cfd: i32, active: &mut HashSet<i32>) {
-    unsafe { 
-        libc::epoll_ctl(epfd, libc::EPOLL_CTL_DEL, cfd, std::ptr::null_mut()); 
-        libc::close(cfd);
-    }
-
-    active.remove(&cfd);
+fn remove_client(epfd: i32, cfd: i32, clients: &mut HashMap<i32, ClientState>) {
+    unsafe { libc::epoll_ctl(epfd, libc::EPOLL_CTL_DEL, cfd, std::ptr::null_mut()); }
+    clients.remove(&cfd);
     println!("removed client {}", cfd);
 }
 
-fn accept_client(epfd: i32, sockfd: i32, clients: &mut Vec<ClientState>) -> Result<i32> {
-    let cfd = unsafe { 
-        libc::accept4(
-            sockfd, 
-            std::ptr::null_mut(), 
-            std::ptr::null_mut(), 
-            libc::SOCK_NONBLOCK
-        )
+fn accept_client(epfd: i32, listener: &TcpListener, clients: &mut HashMap<i32, ClientState>) -> Result<()> {
+    let (stream, _) = match listener.accept() {
+        Ok(s) => s,
+        Err(e) => return Err(e)
     };
-    if cfd < 0 {
-        eprintln!("failed to accept client (fd = {})", cfd);
-        return Err(Error::last_os_error());
-    }
 
+    if let Err(e) = stream.set_nonblocking(true) {
+        return Err(e);
+    }
+    let cfd = stream.as_raw_fd();
     println!("accepted a client (fd = {})", cfd);
 
     let mut e = libc::epoll_event {
@@ -106,23 +98,18 @@ fn accept_client(epfd: i32, sockfd: i32, clients: &mut Vec<ClientState>) -> Resu
     let ret = unsafe { libc::epoll_ctl(epfd, libc::EPOLL_CTL_ADD, cfd, &mut e) };
     if ret < 0 {
         eprintln!("failed to add client to epoll");
-        unsafe { libc::close(cfd) };
+        stream.shutdown(Shutdown::Both);
         return Err(Error::last_os_error());
     }
 
-    let client = clients.get_mut(cfd as usize).unwrap();
-    client.fd = cfd;
-    client.buf.clear();
+    let client = ClientState::with_stream(stream);
+    clients.insert(cfd, client);
 
-    Ok(cfd)
+    Ok(())
 }
 
-fn await_clients(sockfd: i32, epfd: i32, events: *mut libc::epoll_event) {
-    let mut clients: Vec<ClientState> = Vec::with_capacity(MAX_EVENTS as usize);
-    let mut active: HashSet<i32> = HashSet::new();
-    for _i in 0..MAX_EVENTS {
-        clients.push(ClientState::with_fd(-1));
-    }
+fn await_clients(listener: TcpListener, epfd: i32, events: *mut libc::epoll_event) {
+    let mut clients: HashMap<i32, ClientState> = HashMap::new();
 
     loop {
         let ready = unsafe { libc::epoll_wait(epfd, events, MAX_EVENTS, -1) };
@@ -133,12 +120,12 @@ fn await_clients(sockfd: i32, epfd: i32, events: *mut libc::epoll_event) {
 
         for i in 0..ready as isize {
             if let Some(event) = unsafe { events.offset(i).as_ref() } {
-                if event.u64 == sockfd as u64 {
-                    if let Ok(cfd) = accept_client(epfd, sockfd, &mut clients) {
-                        active.insert(cfd);
+                if event.u64 == listener.as_raw_fd() as u64 {
+                    if let Err(e) = accept_client(epfd, &listener, &mut clients) {
+                        eprintln!("{e}");
                     }
                 } else {
-                    handle_client(epfd, event.u64 as i32, &mut clients, &mut active);
+                    handle_client(epfd, event.u64 as i32, &mut clients);
                 }
             }
         }
@@ -175,10 +162,9 @@ fn main() -> Result<()> {
 
     println!("epoll server listening on port {}...\n", opt.port);
 
-    let sockfd = listener.as_raw_fd();
-    let epfd = epoll_init(sockfd)?;
+    let epfd = epoll_init(listener.as_raw_fd())?;
     let events: *mut libc::epoll_event = Vec::with_capacity(MAX_EVENTS as usize).as_mut_ptr();
-    await_clients(sockfd, epfd, events);
+    await_clients(listener, epfd, events);
 
     Ok(())
 }
