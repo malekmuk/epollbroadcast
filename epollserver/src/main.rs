@@ -30,8 +30,7 @@ impl ClientState {
 }
 
 fn broadcast_message(orator: &ClientState, clients: &mut HashMap<i32, ClientState>) {
-    let stream = orator.stream.borrow();
-    let ofd = stream.as_raw_fd();
+    let ofd = orator.stream.as_raw_fd();
     let message = orator.buf.as_ref();
 
     for (cfd, client) in clients.iter_mut() {
@@ -45,9 +44,8 @@ fn broadcast_message(orator: &ClientState, clients: &mut HashMap<i32, ClientStat
 
 fn handle_client(epfd: i32, cfd: i32, clients: &mut HashMap<i32, ClientState>) {
     let mut client = clients.remove(&cfd).unwrap();
-    let stream = client.stream.borrow_mut();
 
-    match stream.read(&mut client.buf) {
+    match client.stream.read(&mut client.buf) {
         Ok(bytes) => {
             if bytes == 0 {
                 remove_client(epfd, cfd, clients);
