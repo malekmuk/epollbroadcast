@@ -34,8 +34,7 @@ fn broadcast_message(cfd: i32, clients: &mut Vec<ClientState>) {
 
     for client in clients {
         if client.fd >= 0 && client.fd != cfd {
-            let ret = unsafe {libc::write(client.fd, message, len)};
-            println!("wrote {} bytes to client {}", ret, client.fd);
+            unsafe {libc::write(client.fd, message, len)};
         }
     }
 }
@@ -45,7 +44,6 @@ fn handle_client(epfd: i32, cfd: i32, clients: &mut Vec<ClientState>) {
     let bufptr = unsafe { client.buf.as_mut_ptr().offset(client.buf.len() as isize) as *mut libc::c_void };
     let count = client.buf.capacity() - client.buf.len();
     let ret = unsafe { libc::read(cfd, bufptr, count) };
-    println!("read {} bytes from client {}", ret, cfd);
     unsafe { client.buf.set_len(client.buf.len() + ret as usize) };
 
     match ret {
