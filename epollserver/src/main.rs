@@ -19,13 +19,6 @@ struct ClientState {
 }
 
 impl ClientState {
-    // pub fn new() -> ClientState {
-    //     ClientState {
-    //         fd: -1,
-    //         buf: Vec::with_capacity(BUFFER_SIZE),
-    //     }
-    // }
-
     pub fn with_fd(fd: i32) -> ClientState {
         ClientState {
             fd,
@@ -48,18 +41,12 @@ fn broadcast_message(cfd: i32, clients: &mut Vec<ClientState>) {
 }
 
 fn handle_client(epfd: i32, cfd: i32, clients: &mut Vec<ClientState>) {
-    println!("cfd = {}, clients len = {}, clients cap = {}", cfd, clients.len(), clients.capacity());
-    
     let client = clients.get_mut(cfd as usize).unwrap();
-    println!("(BR) client buf len = {}, client buf cap = {}", client.buf.len(), client.buf.capacity());
-
     let bufptr = unsafe { client.buf.as_mut_ptr().offset(client.buf.len() as isize) as *mut libc::c_void };
     let count = client.buf.capacity() - client.buf.len();
     let ret = unsafe { libc::read(cfd, bufptr, count) };
-    println!("read retval = {}", ret);
-    unsafe {client.buf.set_len(client.buf.len() + ret as usize) };
-    println!("(AR) client buf len = {}, client buf cap = {}", client.buf.len(), client.buf.capacity());
-    println!("client buf: {:?}", client.buf);
+    println!("read {} bytes from client {}", ret, cfd);
+    unsafe { client.buf.set_len(client.buf.len() + ret as usize) };
 
     match ret {
         -1 => {
@@ -79,7 +66,6 @@ fn handle_client(epfd: i32, cfd: i32, clients: &mut Vec<ClientState>) {
         }
         _ => {
             if client.buf.ends_with(b"\n") || client.buf.len() == BUFFER_SIZE {
-                println!("broadcasting message to all clients!");
                 broadcast_message(cfd, clients);
 
                 /* Need to get new mutable reference after broadcast_message() */
@@ -97,9 +83,8 @@ fn remove_client(epfd: i32, cfd: i32, clients: &mut Vec<ClientState>) {
 
     if let Some(client) = clients.get_mut(cfd as usize) {
         client.fd = -1;
+        println!("removed client {}", cfd);
     }
-
-    println!("removed client {}", cfd);
 }
 
 fn accept_client(epfd: i32, sockfd: i32, clients: &mut Vec<ClientState>) {
