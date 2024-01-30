@@ -83,7 +83,7 @@ fn remove_client(epfd: i32, cfd: i32, clients: &mut Vec<ClientState>) {
 
     if let Some(client) = clients.get_mut(cfd as usize) {
         client.fd = -1;
-        println!("removed client {}", cfd);
+        println!("Removed client {}", cfd);
     }
 }
 
@@ -97,11 +97,11 @@ fn accept_client(epfd: i32, sockfd: i32, clients: &mut Vec<ClientState>) {
         )
     };
     if cfd < 0 {
-        eprintln!("Failed to accept client (fd = {})", cfd);
+        eprintln!("failed to accept client (fd = {})", cfd);
         return;
     }
 
-    println!("Accepted a client! (fd = {})", cfd);
+    println!("accepted a client (fd = {})", cfd);
 
     let mut e = libc::epoll_event {
         events: libc::EPOLLIN as u32,
@@ -110,7 +110,7 @@ fn accept_client(epfd: i32, sockfd: i32, clients: &mut Vec<ClientState>) {
 
     let ret = unsafe { libc::epoll_ctl(epfd, libc::EPOLL_CTL_ADD, cfd, &mut e) };
     if ret < 0 {
-        eprintln!("Failed to add client to epoll");
+        eprintln!("failed to add client to epoll");
         unsafe { libc::close(cfd) };
         return;
     }
@@ -128,8 +128,6 @@ fn await_clients(sockfd: i32, epfd: i32, events: *mut libc::epoll_event) {
     }
 
     loop {
-        println!("Waiting for events!");
-
         let ready = unsafe { libc::epoll_wait(epfd, events, MAX_EVENTS, -1) };
         if ready < 0 {
             unsafe {
@@ -139,7 +137,6 @@ fn await_clients(sockfd: i32, epfd: i32, events: *mut libc::epoll_event) {
             continue;
         }
 
-        println!("Got {} events!", ready);
         for i in 0..ready as isize {
             if let Some(event) = unsafe { events.offset(i).as_mut() } {
                 if event.u64 == sockfd as u64 {
