@@ -44,7 +44,7 @@ fn broadcast_message(orator: &ClientState, clients: &mut HashMap<i32, ClientStat
 }
 
 fn handle_client(epfd: i32, cfd: i32, clients: &mut HashMap<i32, ClientState>) {
-    let client = clients.get_mut(&cfd).unwrap();
+    let mut client = clients.remove(&cfd).unwrap();
     let stream = client.stream.borrow_mut();
     let cfd = stream.as_raw_fd();
 
@@ -56,8 +56,9 @@ fn handle_client(epfd: i32, cfd: i32, clients: &mut HashMap<i32, ClientState>) {
             }
 
             if client.buf.ends_with(b"\n") || client.buf.len() == BUFFER_SIZE {
-                broadcast_message(client, clients);
+                broadcast_message(&client, clients);
                 client.buf.clear();
+                clients.insert(cfd, client);
             } 
         },
         Err(e) => {
@@ -98,7 +99,7 @@ fn accept_client(epfd: i32, listener: &TcpListener, clients: &mut HashMap<i32, C
     let ret = unsafe { libc::epoll_ctl(epfd, libc::EPOLL_CTL_ADD, cfd, &mut e) };
     if ret < 0 {
         eprintln!("failed to add client to epoll");
-        stream.shutdown(Shutdown::Both);
+        let _ = stream.shutdown(Shutdown::Both);
         return Err(Error::last_os_error());
     }
 
