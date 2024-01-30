@@ -128,10 +128,7 @@ fn await_clients(sockfd: i32, epfd: i32, events: *mut libc::epoll_event) {
     loop {
         let ready = unsafe { libc::epoll_wait(epfd, events, MAX_EVENTS, -1) };
         if ready < 0 {
-            unsafe {
-                let errno = libc::__errno_location();
-                eprintln!("epoll_wait error: {}", *errno);
-            }
+            unsafe { eprintln!("epoll_wait error: {}", *(libc::__errno_location())); }
             continue;
         }
 
