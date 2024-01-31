@@ -23,7 +23,7 @@ impl ClientState {
     pub fn with_stream(stream: TcpStream) -> ClientState {
         ClientState {
             stream,
-            buf: Vec::with_capacity(BUFFER_SIZE),
+            buf: vec![0; BUFFER_SIZE],
         }
     }
 }
@@ -44,7 +44,7 @@ fn broadcast_message(orator: &ClientState, clients: &mut HashMap<i32, ClientStat
 fn handle_client(epfd: i32, cfd: i32, clients: &mut HashMap<i32, ClientState>) {
     let mut client = clients.remove(&cfd).unwrap();
 
-    match client.stream.read(&mut client.buf) {
+    match client.stream.read(client.buf.as_mut()) {
         Ok(bytes) => {
             if bytes == 0 {
                 remove_client(epfd, cfd, clients);
@@ -53,7 +53,7 @@ fn handle_client(epfd: i32, cfd: i32, clients: &mut HashMap<i32, ClientState>) {
 
             if client.buf.ends_with(b"\n") || client.buf.len() == BUFFER_SIZE {
                 broadcast_message(&client, clients);
-                client.buf.clear();
+                client.buf.iter_mut().for_each(|x| *x = 0);
                 clients.insert(cfd, client);
             } 
         },
