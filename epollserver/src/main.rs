@@ -2,10 +2,13 @@ use std::collections::HashMap;
 use std::net::{TcpListener, TcpStream};
 use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use structopt::StructOpt;
 
 const MAX_EVENTS: i32 = 256;
 const BUFFER_SIZE: usize = 256;
+
+static TOTAL_BYTES_SENT: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "epollserver")]
@@ -32,21 +35,27 @@ impl ClientState {
     }
 }
 
-fn broadcast_message(orator: &mut ClientState, clients: &mut HashMap<i32, ClientState>) {
+// tries to write orators buffer to every client connected, does not try again
+// if write fails.
+//
+// returns total number of bytes written across all clients
+fn broadcast_message(orator: &mut ClientState, clients: &mut HashMap<i32, ClientState>) -> usize {
     let ofd = orator.stream.as_raw_fd();
-    let message = &orator.buf[0..=orator.needle];
+    let message = &orator.buf[0..orator.needle];
+    let mut bytes = 0;
 
     for (cfd, client) in clients.iter_mut() {
         if *cfd != ofd {
-            if let Err(e) = client.stream.write(message) {
-                eprintln!("write error (fd = {}): {e}", *cfd);
+            match client.stream.write(message) {
+                Ok(n) => bytes += n,
+                Err(e) => eprintln!("write error (fd = {}): {e}", *cfd),
             }
         }
     }
 
     // if there are left over bytes past the needle, shift them to the 
     // beginning of the buffer for next read, this way writes always start at index 0
-    if orator.needle < orator.off - 1 {
+    if orator.needle < orator.off {
         orator.off -= orator.needle;
         for i in 0..orator.off {
             orator.buf[i] = orator.buf[orator.needle];
@@ -56,22 +65,21 @@ fn broadcast_message(orator: &mut ClientState, clients: &mut HashMap<i32, Client
         orator.off = 0;
     }
     orator.needle = 0;
+
+    bytes
 }
 
 /* returns true if message should be broadcasted */
 fn check_message(client: &mut ClientState, bytes: usize) -> bool {
-    for i in (client.off..bytes).rev() {
+    for i in (0..client.off + bytes).rev() {
         if client.buf[i] == b'\n' {
-            client.needle = i;
+            client.needle = i + 1;
+            break;
         }
     }
 
     client.off += bytes;
     if client.needle > 0 {
-        return true;
-    }
-    if client.off == BUFFER_SIZE {
-        client.needle = BUFFER_SIZE - 1;
         return true;
     }
 
@@ -89,7 +97,9 @@ fn handle_client(epfd: i32, cfd: i32, clients: &mut HashMap<i32, ClientState>) {
             }
 
             if check_message(&mut client, bytes) {
-                broadcast_message(&mut client, clients);
+                let sent = broadcast_message(&mut client, clients);
+                TOTAL_BYTES_SENT.fetch_add(sent, Ordering::Relaxed);
+                println!("sent {:?} bytes", TOTAL_BYTES_SENT);
             }
             clients.insert(cfd, client);
         },
