@@ -15,22 +15,26 @@ struct Opt {
 }
 
 struct ClientState {
+    off: usize,
+    needle: usize, /* position of last \n */
+    buf: Box<[u8; BUFFER_SIZE]>,
     stream: TcpStream,
-    buf: Vec<u8>
 }
 
 impl ClientState {
     pub fn with_stream(stream: TcpStream) -> ClientState {
         ClientState {
+            off: 0, /* index of last u8 in buf if buf has no \n */
+            needle: 0, /* index of last \n in buf */
+            buf: Box::new([0; BUFFER_SIZE]),
             stream,
-            buf: vec![0; BUFFER_SIZE],
         }
     }
 }
 
-fn broadcast_message(orator: &ClientState, clients: &mut HashMap<i32, ClientState>) {
+fn broadcast_message(orator: &mut ClientState, clients: &mut HashMap<i32, ClientState>) {
     let ofd = orator.stream.as_raw_fd();
-    let message = orator.buf.as_ref();
+    let message = &orator.buf[0..=orator.needle];
 
     for (cfd, client) in clients.iter_mut() {
         if *cfd != ofd {
@@ -39,23 +43,55 @@ fn broadcast_message(orator: &ClientState, clients: &mut HashMap<i32, ClientStat
             }
         }
     }
+
+    // if there are left over bytes past the needle, shift them to the 
+    // beginning of the buffer for next read, this way writes always start at index 0
+    if orator.needle < orator.off - 1 {
+        orator.off -= orator.needle;
+        for i in 0..orator.off {
+            orator.buf[i] = orator.buf[orator.needle];
+            orator.needle += 1;
+        }
+    } else {
+        orator.off = 0;
+    }
+    orator.needle = 0;
+}
+
+/* returns true if message should be broadcasted */
+fn check_message(client: &mut ClientState, bytes: usize) -> bool {
+    for i in (client.off..bytes).rev() {
+        if client.buf[i] == b'\n' {
+            client.needle = i;
+        }
+    }
+
+    client.off += bytes;
+    if client.needle > 0 {
+        return true;
+    }
+    if client.off == BUFFER_SIZE {
+        client.needle = BUFFER_SIZE - 1;
+        return true;
+    }
+
+    false
 }
 
 fn handle_client(epfd: i32, cfd: i32, clients: &mut HashMap<i32, ClientState>) {
     let mut client = clients.remove(&cfd).unwrap();
 
-    match client.stream.read(client.buf.as_mut()) {
+    match client.stream.read(&mut client.buf[client.off..BUFFER_SIZE]) {
         Ok(bytes) => {
             if bytes == 0 {
                 remove_client(epfd, cfd, clients);
                 return;
             }
 
-            if client.buf.ends_with(b"\n") || client.buf.len() == BUFFER_SIZE {
-                broadcast_message(&client, clients);
-                client.buf.iter_mut().for_each(|x| *x = 0);
-                clients.insert(cfd, client);
-            } 
+            if check_message(&mut client, bytes) {
+                broadcast_message(&mut client, clients);
+            }
+            clients.insert(cfd, client);
         },
         Err(e) => {
             match e.kind() {
