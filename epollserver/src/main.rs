@@ -48,7 +48,7 @@ fn broadcast_message(orator: &mut ClientState, clients: &mut HashMap<i32, Client
         if *cfd != ofd {
             match client.stream.write(message) {
                 Ok(n) => bytes += n,
-                Err(e) => eprintln!("write error (fd = {}): {e}", *cfd),
+                Err(_e) => /*eprintln!("write error (fd = {}): {e}", *cfd)*/ {},
             }
         }
     }
@@ -86,14 +86,13 @@ fn check_message(client: &mut ClientState, bytes: usize) -> bool {
     false
 }
 
-fn handle_client(epfd: i32, cfd: i32, clients: &mut HashMap<i32, ClientState>) {
+fn handle_client(cfd: i32, clients: &mut HashMap<i32, ClientState>) -> Result<()> {
     let mut client = clients.remove(&cfd).unwrap();
 
     match client.stream.read(&mut client.buf[client.off..BUFFER_SIZE]) {
         Ok(bytes) => {
-            if bytes == 0 {
-                remove_client(epfd, cfd, clients);
-                return;
+            if bytes == 0 { 
+                return Err(Error::from(ErrorKind::ConnectionAborted)); 
             }
 
             if check_message(&mut client, bytes) {
@@ -101,15 +100,17 @@ fn handle_client(epfd: i32, cfd: i32, clients: &mut HashMap<i32, ClientState>) {
                 TOTAL_BYTES_SENT.fetch_add(sent, Ordering::Relaxed);
                 println!("sent {:?} bytes", TOTAL_BYTES_SENT);
             }
+
             clients.insert(cfd, client);
+            Ok(())
         },
         Err(e) => {
             match e.kind() {
-                ErrorKind::WouldBlock => return,
-                _ =>  { 
-                    eprintln!("read error (removing fd = {}): {}", cfd, Error::last_os_error());
-                    remove_client(epfd, cfd, clients);
+                ErrorKind::WouldBlock => {
+                    clients.insert(cfd, client); 
+                    Ok(())
                 }
+                _ => Err(e)
             }
         }
     }
@@ -165,7 +166,9 @@ fn await_clients(listener: TcpListener, epfd: i32, events: *mut libc::epoll_even
                         clients.insert(stream.as_raw_fd(), ClientState::with_stream(stream));
                     }
                 } else {
-                    handle_client(epfd, event.u64 as i32, &mut clients);
+                    if let Err(_e) = handle_client(event.u64 as i32, &mut clients) {
+                        remove_client(epfd, event.u64 as i32, &mut clients)
+                    }
                 }
             }
         }
