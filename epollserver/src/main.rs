@@ -87,29 +87,27 @@ fn check_message(client: &mut ClientState, bytes: usize) -> bool {
 }
 
 fn handle_client(cfd: i32, clients: &mut HashMap<i32, ClientState>) -> Result<()> {
-    let mut client = clients.remove(&cfd).unwrap();
-
-    match client.stream.read(&mut client.buf[client.off..BUFFER_SIZE]) {
+    let client = clients.get_mut(&cfd).unwrap() as *mut ClientState;
+    
+    match unsafe { (*client).stream.read(&mut (*client).buf[(*client).off..BUFFER_SIZE]) } {
         Ok(bytes) => {
             if bytes == 0 { 
                 return Err(Error::from(ErrorKind::ConnectionAborted)); 
             }
 
-            if check_message(&mut client, bytes) {
-                let sent = broadcast_message(&mut client, clients);
-                TOTAL_BYTES_SENT.fetch_add(sent, Ordering::Relaxed);
-                println!("sent {:?} bytes", TOTAL_BYTES_SENT);
+            unsafe {
+                if check_message(&mut *client, bytes) {
+                    let sent = broadcast_message(&mut *client, clients);
+                    TOTAL_BYTES_SENT.fetch_add(sent, Ordering::Relaxed);
+                    println!("sent {:?} bytes", TOTAL_BYTES_SENT);
+                }
             }
 
-            clients.insert(cfd, client);
             Ok(())
         },
         Err(e) => {
             match e.kind() {
-                ErrorKind::WouldBlock => {
-                    clients.insert(cfd, client); 
-                    Ok(())
-                }
+                ErrorKind::WouldBlock => Ok(()),
                 _ => Err(e)
             }
         }
