@@ -1,4 +1,3 @@
-use std::borrow::{Borrow, BorrowMut};
 use std::collections::HashMap;
 use std::net::{TcpListener, TcpStream};
 use std::io::{Error, ErrorKind, Read, Result, Write};
@@ -158,8 +157,8 @@ fn main() -> Result<()> {
     println!("epoll server listening on port {}...\n", opt.port);
 
     let epfd = epoll_init(listener.as_raw_fd())?;
-    let events: *mut libc::epoll_event = Vec::with_capacity(MAX_EVENTS as usize).as_mut_ptr();
-    await_clients(listener, epfd, events);
+    let mut events = Vec::with_capacity(MAX_EVENTS as usize);
+    await_clients(listener, epfd, events.as_mut_ptr());
 
     Ok(())
 }
