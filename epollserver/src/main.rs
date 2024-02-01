@@ -182,12 +182,11 @@ fn handle_event(event: &libc::epoll_event, epserver: &EpollServer, clients: &mut
 }
 
 fn await_clients(mut epserver: EpollServer) {
-    let epfd = epserver.epfd;
     let events = epserver.events.as_mut_ptr();
     let mut clients: HashMap<i32, ClientState> = HashMap::new();
 
     loop {
-        let ready = unsafe { libc::epoll_wait(epfd, events, MAX_EVENTS, -1) };
+        let ready = unsafe { libc::epoll_wait(epserver.epfd, events, MAX_EVENTS, -1) };
         if ready < 0 {
             eprintln!("epoll_wait error: {}", Error::last_os_error());
             match Error::last_os_error().kind() {
