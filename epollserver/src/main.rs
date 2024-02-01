@@ -27,8 +27,8 @@ struct ClientState {
 impl ClientState {
     pub fn with_stream(stream: TcpStream) -> ClientState {
         ClientState {
-            off: 0, /* index of last u8 in buf if buf has no \n */
-            needle: 0, /* index of last \n in buf */
+            off: 0, /* index after last u8 in buf if buf has no \n */
+            needle: 0, /* index after last \n in buf */
             buf: Box::new([0; BUFFER_SIZE]),
             stream,
         }
