@@ -35,6 +35,22 @@ impl ClientState {
     }
 }
 
+struct EpollServer {
+    epfd: i32,
+    events: Vec<libc::epoll_event>,
+    listener: TcpListener,
+}
+
+impl EpollServer {
+    pub fn new(epfd: i32, max_events: usize, listener: TcpListener) -> EpollServer {
+        EpollServer {
+            epfd,
+            events: Vec::with_capacity(max_events),
+            listener,
+        }
+    }
+}
+
 // tries to write orators buffer to every client connected, does not try again
 // if write fails.
 //
@@ -87,7 +103,12 @@ fn check_message(client: &mut ClientState, bytes: usize) -> bool {
 }
 
 fn handle_client(cfd: i32, clients: &mut HashMap<i32, ClientState>) -> Result<()> {
-    let client = clients.get_mut(&cfd).unwrap() as *mut ClientState;
+    // hack to get around double mutable borrows by using a raw pointer.
+    // should probably be using Rc and RefCell
+    let client = match clients.get_mut(&cfd) {
+        Some(c) => c as *mut ClientState,
+        None => return Err(Error::from(ErrorKind::InvalidInput)),
+    };
     
     match unsafe { (*client).stream.read(&mut (*client).buf[(*client).off..BUFFER_SIZE]) } {
         Ok(bytes) => {
@@ -146,28 +167,38 @@ fn accept_client(epfd: i32, listener: &TcpListener) -> Result<TcpStream> {
     Ok(stream)
 }
 
-fn await_clients(listener: TcpListener, epfd: i32, events: *mut libc::epoll_event) {
+fn handle_event(event: &libc::epoll_event, epserver: &EpollServer, clients: &mut HashMap<i32, ClientState>) {
+    if event.u64 == epserver.listener.as_raw_fd() as u64 {
+        if let Ok(stream) = accept_client(epserver.epfd, &epserver.listener) {
+            clients.insert(stream.as_raw_fd(), ClientState::with_stream(stream));
+        }
+    } else {
+        if let Err(e) = handle_client(event.u64 as i32, clients) {
+            if e.kind() != ErrorKind::InvalidInput {
+                remove_client(epserver.epfd, event.u64 as i32, clients)
+            }
+        }
+    }
+}
+
+fn await_clients(mut epserver: EpollServer) {
+    let epfd = epserver.epfd;
+    let events = epserver.events.as_mut_ptr();
     let mut clients: HashMap<i32, ClientState> = HashMap::new();
-    let sockfd = listener.as_raw_fd() as u64;
 
     loop {
         let ready = unsafe { libc::epoll_wait(epfd, events, MAX_EVENTS, -1) };
         if ready < 0 {
             eprintln!("epoll_wait error: {}", Error::last_os_error());
-            continue;
+            match Error::last_os_error().kind() {
+                ErrorKind::Interrupted => continue,
+                _ => break,
+            }
         }
 
         for i in 0..ready as isize {
             if let Some(event) = unsafe { events.offset(i).as_ref() } {
-                if event.u64 == sockfd {
-                    if let Ok(stream) = accept_client(epfd, &listener) {
-                        clients.insert(stream.as_raw_fd(), ClientState::with_stream(stream));
-                    }
-                } else {
-                    if let Err(_e) = handle_client(event.u64 as i32, &mut clients) {
-                        remove_client(epfd, event.u64 as i32, &mut clients)
-                    }
-                }
+                handle_event(event, &epserver, &mut clients);
             }
         }
     }
@@ -200,12 +231,9 @@ fn main() -> Result<()> {
     let opt = Opt::from_args();
     let addr = format!("localhost:{}", opt.port);
     let listener = TcpListener::bind(addr)?;
-
-    println!("epoll server listening on port {}...\n", opt.port);
-
     let epfd = epoll_init(listener.as_raw_fd())?;
-    let mut events = Vec::with_capacity(MAX_EVENTS as usize);
-    await_clients(listener, epfd, events.as_mut_ptr());
+    println!("epoll server listening on port {}...\n", opt.port);
+    await_clients(EpollServer::new(epfd, MAX_EVENTS as usize, listener));
 
-    Ok(())
+    Err(Error::last_os_error())
 }
