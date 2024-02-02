@@ -19,8 +19,8 @@ struct Opt {
 }
 
 struct ClientState {
-    off: usize,
-    needle: usize, /* position of last \n */
+    off: usize, // index after last u8 in buf if buf has no \n
+    needle: usize, // index after last \n in buf
     buf: Box<[u8; BUFFER_SIZE]>,
     stream: TcpStream,
 }
@@ -28,8 +28,8 @@ struct ClientState {
 impl ClientState {
     pub fn with_stream(stream: TcpStream) -> ClientState {
         ClientState {
-            off: 0, /* index after last u8 in buf if buf has no \n */
-            needle: 0, /* index after last \n in buf */
+            off: 0,
+            needle: 0,
             buf: Box::new([0; BUFFER_SIZE]),
             stream,
         }
@@ -95,7 +95,7 @@ fn broadcast_message(orator: &mut ClientState, clients: &HashMap<i32, RefCell<Cl
         if *cfd != ofd {
             match client.borrow_mut().stream.write(message) {
                 Ok(n) => bytes += n,
-                Err(_e) => /* eprintln!("write error (fd = {}): {e}", *cfd) */ {},
+                Err(_) => /* eprintln!("write error (fd = {}): {e}", *cfd) */ {},
             }
         }
     }
