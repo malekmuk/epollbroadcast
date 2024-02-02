@@ -48,12 +48,35 @@ struct EpollServer {
 }
 
 impl EpollServer {
-    pub fn new(epfd: i32, max_events: usize, listener: TcpListener) -> EpollServer {
-        EpollServer {
-            epfd,
-            events: Vec::with_capacity(max_events),
-            listener,
+    pub fn new(listener: TcpListener, max_events: usize) -> Result<EpollServer> {
+        let sockfd = listener.as_raw_fd();
+
+        unsafe {
+            let epfd = libc::epoll_create1(0);
+
+            if epfd >= 0 {
+                let mut e = libc::epoll_event {
+                    events: libc::EPOLLIN as u32,
+                    u64: sockfd as u64
+                };
+                
+                if libc::epoll_ctl(epfd, libc::EPOLL_CTL_ADD, sockfd, &mut e) == 0 {
+                    return Ok(
+                        EpollServer {
+                            epfd,
+                            events: Vec::with_capacity(max_events),
+                            listener
+                        }
+                    );
+                } else {
+                    let errmsg = format!("epoll_ctl failed to add server fd {} -- {}", sockfd, Error::last_os_error());
+                    return Err(Error::other(errmsg));
+                }
+            }
         }
+
+        let errmsg = format!("epoll_create1 failed -- {}", Error::last_os_error());
+        Err(Error::other(errmsg))
     }
 }
 
@@ -211,36 +234,13 @@ fn await_clients(mut epserver: EpollServer) {
     }
 }
 
-fn epoll_init(sockfd: i32) -> Result<i32> {
-    unsafe {
-        let epfd = libc::epoll_create1(0);
-
-        if epfd >= 0 {
-            let mut e = libc::epoll_event {
-                events: libc::EPOLLIN as u32,
-                u64: sockfd as u64
-            };
-            
-            if libc::epoll_ctl(epfd, libc::EPOLL_CTL_ADD, sockfd, &mut e) == 0 {
-                return Ok(epfd);
-            } else {
-                let errmsg = format!("epoll_ctl failed to add server fd {} -- {}", sockfd, Error::last_os_error());
-                return Err(Error::other(errmsg));
-            }
-        }
-    }
-    
-    let errmsg = format!("epoll_create1 failed -- {}", Error::last_os_error());
-    Err(Error::other(errmsg))
-}
-
 fn main() -> Result<()> {
     let opt = Opt::from_args();
     let addr = format!("localhost:{}", opt.port);
     let listener = TcpListener::bind(addr)?;
-    let epfd = epoll_init(listener.as_raw_fd())?;
+    let epserver = EpollServer::new(listener, MAX_EVENTS as usize)?;
     println!("epoll server listening on port {}...\n", opt.port);
-    await_clients(EpollServer::new(epfd, MAX_EVENTS as usize, listener));
+    await_clients(epserver);
 
     Err(Error::last_os_error())
 }
