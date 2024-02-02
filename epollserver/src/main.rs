@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::net::{TcpListener, TcpStream};
 use std::io::{Error, ErrorKind, Read, Result, Write};
@@ -33,6 +34,11 @@ impl ClientState {
             stream,
         }
     }
+
+    /// Mutably borrow the clients tcp stream and buffer together for reading.
+    pub fn borrow_reader_mut(&mut self) -> (&mut TcpStream, &mut [u8]) {
+        (&mut self.stream, &mut *self.buf)
+    }
 }
 
 struct EpollServer {
@@ -51,20 +57,22 @@ impl EpollServer {
     }
 }
 
-// tries to write orators buffer to every client connected, does not try again
-// if write fails.
-//
-// returns total number of bytes written across all clients
-fn broadcast_message(orator: &mut ClientState, clients: &mut HashMap<i32, ClientState>) -> usize {
+/// Attempts to write orators buffer to every client connected, does not try again
+/// if write fails.
+///
+/// Returns total number of bytes written across all clients.
+fn broadcast_message(orator: &mut ClientState, clients: &HashMap<i32, RefCell<ClientState>>) -> usize {
     let ofd = orator.stream.as_raw_fd();
     let message = &orator.buf[0..orator.needle];
     let mut bytes = 0;
 
-    for (cfd, client) in clients.iter_mut() {
+    for (cfd, client) in clients.iter() {
+        // ensure we don't mutably borrow the orator a second time
+        // (first mutable borrow occurs in handle_client())
         if *cfd != ofd {
-            match client.stream.write(message) {
+            match client.borrow_mut().stream.write(message) {
                 Ok(n) => bytes += n,
-                Err(_e) => /*eprintln!("write error (fd = {}): {e}", *cfd)*/ {},
+                Err(_e) => /* eprintln!("write error (fd = {}): {e}", *cfd) */ {},
             }
         }
     }
@@ -85,7 +93,9 @@ fn broadcast_message(orator: &mut ClientState, clients: &mut HashMap<i32, Client
     bytes
 }
 
-/* returns true if message should be broadcasted */
+/// Checks clients buffer after reading for a newline and adjusts offset and needle.
+/// 
+/// Returns true if message should be broadcasted.
 fn check_message(client: &mut ClientState, bytes: usize) -> bool {
     for i in (0..client.off + bytes).rev() {
         if client.buf[i] == b'\n' {
@@ -102,26 +112,24 @@ fn check_message(client: &mut ClientState, bytes: usize) -> bool {
     false
 }
 
-fn handle_client(cfd: i32, clients: &mut HashMap<i32, ClientState>) -> Result<()> {
-    // hack to get around double mutable borrows by using a raw pointer.
-    // should probably be using Rc and RefCell
-    let client = match clients.get_mut(&cfd) {
-        Some(c) => c as *mut ClientState,
+fn handle_client(cfd: i32, clients: &HashMap<i32, RefCell<ClientState>>) -> Result<()> {
+    let mut client = match clients.get(&cfd) {
+        Some(c) => c.borrow_mut(),
         None => return Err(Error::from(ErrorKind::InvalidInput)),
     };
     
-    match unsafe { (*client).stream.read(&mut (*client).buf[(*client).off..BUFFER_SIZE]) } {
+    let off = client.off;
+    let (stream, buf) = client.borrow_reader_mut();
+    match stream.read(&mut buf[off..BUFFER_SIZE]) {
         Ok(bytes) => {
             if bytes == 0 { 
                 return Err(Error::from(ErrorKind::ConnectionAborted)); 
             }
 
-            unsafe {
-                if check_message(&mut *client, bytes) {
-                    let sent = broadcast_message(&mut *client, clients);
-                    TOTAL_BYTES_SENT.fetch_add(sent, Ordering::Relaxed);
-                    println!("sent {:?} bytes", TOTAL_BYTES_SENT);
-                }
+            if check_message(&mut client, bytes) {
+                let sent = broadcast_message(&mut client, clients);
+                TOTAL_BYTES_SENT.fetch_add(sent, Ordering::Relaxed);
+                println!("sent {:?} bytes", TOTAL_BYTES_SENT);
             }
 
             Ok(())
@@ -135,7 +143,7 @@ fn handle_client(cfd: i32, clients: &mut HashMap<i32, ClientState>) -> Result<()
     }
 }
 
-fn remove_client(epfd: i32, cfd: i32, clients: &mut HashMap<i32, ClientState>) {
+fn remove_client(epfd: i32, cfd: i32, clients: &mut HashMap<i32, RefCell<ClientState>>) {
     unsafe { libc::epoll_ctl(epfd, libc::EPOLL_CTL_DEL, cfd, std::ptr::null_mut()); }
     clients.remove(&cfd);
     println!("removed client {}", cfd);
@@ -167,10 +175,10 @@ fn accept_client(epfd: i32, listener: &TcpListener) -> Result<TcpStream> {
     Ok(stream)
 }
 
-fn handle_event(event: &libc::epoll_event, epserver: &EpollServer, clients: &mut HashMap<i32, ClientState>) {
+fn handle_event(event: &libc::epoll_event, epserver: &EpollServer, clients: &mut HashMap<i32, RefCell<ClientState>>) {
     if event.u64 == epserver.listener.as_raw_fd() as u64 {
         if let Ok(stream) = accept_client(epserver.epfd, &epserver.listener) {
-            clients.insert(stream.as_raw_fd(), ClientState::with_stream(stream));
+            clients.insert(stream.as_raw_fd(), RefCell::new(ClientState::with_stream(stream)));
         }
     } else {
         if let Err(e) = handle_client(event.u64 as i32, clients) {
@@ -183,7 +191,7 @@ fn handle_event(event: &libc::epoll_event, epserver: &EpollServer, clients: &mut
 
 fn await_clients(mut epserver: EpollServer) {
     let events = epserver.events.as_mut_ptr();
-    let mut clients: HashMap<i32, ClientState> = HashMap::new();
+    let mut clients: HashMap<i32, RefCell<ClientState>> = HashMap::new();
 
     loop {
         let ready = unsafe { libc::epoll_wait(epserver.epfd, events, MAX_EVENTS, -1) };
